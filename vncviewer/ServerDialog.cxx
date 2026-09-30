@@ -24,21 +24,24 @@
 #include <errno.h>
 #include <algorithm>
 #include <libgen.h>
+#include <vector>
 
 // FIXME: Workaround for FLTK including windows.h
 #ifdef WIN32
 #include <winsock2.h>
+#include <windows.h>
 #endif
 
 #include <FL/Fl.H>
 #include <FL/Fl_Input.H>
-#include <FL/Fl_Input_Choice.H>
+#include <FL/Fl_Hold_Browser.H>
 #include <FL/Fl_Button.H>
 #include <FL/Fl_Return_Button.H>
 #include <FL/fl_draw.H>
 #include <FL/fl_ask.H>
 #include <FL/Fl_Box.H>
 #include <FL/Fl_File_Chooser.H>
+#include <FL/fl_utf8.h>
 
 #include <core/Exception.h>
 #include <core/LogWriter.h>
@@ -50,18 +53,45 @@
 
 #include "fltk/layout.h"
 #include "fltk/util.h"
-#include "fltk/Fl_Suggestion_Input.h"
 #include "ServerDialog.h"
 #include "OptionsDialog.h"
 #include "vncviewer.h"
 #include "parameters.h"
+#include "CConn.h"
 
 static core::LogWriter vlog("ServerDialog");
 
 const char* SERVER_HISTORY="tigervnc.history";
 
+static bool same_server(const std::string& a, const std::string& b)
+{
+  std::string hostA, hostB;
+  int portA, portB;
+
+#ifndef WIN32
+  if ((a.find("/") != std::string::npos) ||
+      (b.find("/") != std::string::npos))
+    return a == b;
+#endif
+
+  try {
+    network::getHostAndPort(a.c_str(), &hostA, &portA);
+    network::getHostAndPort(b.c_str(), &hostB, &portB);
+  } catch (std::exception&) {
+    return false;
+  }
+
+  if (hostA != hostB)
+    return false;
+
+  if (portA != portB)
+    return false;
+
+  return true;
+}
+
 ServerDialog::ServerDialog()
-  : Fl_Window(450, 0, "TigerVNC")
+  : Fl_Window(520, 0, _("TigerVNC"))
 {
   int x, y, x2;
   Fl_Button *button;
@@ -70,13 +100,48 @@ ServerDialog::ServerDialog()
   x = OUTER_MARGIN;
   y = OUTER_MARGIN;
 
-  serverName = new Fl_Suggestion_Input(
-    LBLLEFT(x, y, w() - OUTER_MARGIN*2, INPUT_HEIGHT, _("VNC server:")), {}
-  );
-  serverName->call_on_remove(onServerHistoryRemove, this);
-  serverName->call_to_normalize(serverHistoryNormalize);
+  Fl_Box *clientTitle = new Fl_Box(x, y, w() - OUTER_MARGIN*2, 20, _("Clients / Servers:"));
+  clientTitle->align(FL_ALIGN_LEFT | FL_ALIGN_INSIDE);
+  clientTitle->labelfont(FL_HELVETICA_BOLD);
+  y += 22;
+
+  clientBrowser = new Fl_Hold_Browser(x, y, w() - OUTER_MARGIN*2, 170);
+  static const int colWidths[] = { 260, 200, 0 };
+  clientBrowser->column_widths(colWidths);
+  clientBrowser->column_char('\t');
+  clientBrowser->callback(this->handleClientSelect, this);
+  clientBrowser->when(FL_WHEN_CHANGED | FL_WHEN_ENTER_KEY_ALWAYS);
+
+  y += 170 + INNER_MARGIN;
+
+  int labelW = 100;
+  int inputW = w() - OUTER_MARGIN*2 - labelW;
+
+  serverName = new Fl_Input(x + labelW, y, inputW, INPUT_HEIGHT, _("Server / IP:"));
+  serverName->align(FL_ALIGN_LEFT);
 
   y += INPUT_HEIGHT + INNER_MARGIN;
+
+  userName = new Fl_Input(x + labelW, y, inputW, INPUT_HEIGHT, _("Login User:"));
+  userName->align(FL_ALIGN_LEFT);
+
+  y += INPUT_HEIGHT + INNER_MARGIN;
+
+  x2 = x;
+
+  btnAddUpdate = new Fl_Button(x2, y, 130, BUTTON_HEIGHT, _("Save Client"));
+  btnAddUpdate->callback(this->handleAddOrUpdateClient, this);
+  x2 += 130 + INNER_MARGIN;
+
+  btnDelete = new Fl_Button(x2, y, 120, BUTTON_HEIGHT, _("Delete Client"));
+  btnDelete->callback(this->handleDeleteClient, this);
+  x2 += 120 + INNER_MARGIN;
+
+  btnClear = new Fl_Button(x2, y, 80, BUTTON_HEIGHT, _("New"));
+  btnClear->callback(this->handleClearInputs, this);
+  x2 += 80 + INNER_MARGIN;
+
+  y += BUTTON_HEIGHT + INNER_MARGIN;
 
   x2 = x;
 
@@ -124,30 +189,50 @@ ServerDialog::ServerDialog()
   callback(this->handleCancel, this);
 }
 
-
 ServerDialog::~ServerDialog()
 {
 }
-
 
 void ServerDialog::run(const char* servername, char *newservername)
 {
   ServerDialog dialog;
 
-  dialog.serverName->value(servername);
+  if (servername && servername[0] != '\0')
+    dialog.serverName->value(servername);
 
-  dialog.show();
+  try {
+    dialog.loadClients();
+    dialog.refreshClientBrowser();
+  } catch (std::exception& e) {
+    vlog.error(_("Unable to load clients: %s"), e.what());
+  }
 
   try {
     dialog.loadServerHistory();
-    dialog.serverName->set_suggestions(dialog.serverHistory);
   } catch (std::exception& e) {
     vlog.error(_("Unable to load the server history: %s"), e.what());
   }
 
+  // Pre-select matching client or first client
+  if (servername && servername[0] != '\0') {
+    for (size_t i = 0; i < dialog.clients.size(); ++i) {
+      if (same_server(dialog.clients[i].ip, servername)) {
+        dialog.clientBrowser->value((int)i + 2);
+        dialog.userName->value(dialog.clients[i].username.c_str());
+        break;
+      }
+    }
+  } else if (!dialog.clients.empty()) {
+    dialog.clientBrowser->value(2);
+    dialog.serverName->value(dialog.clients[0].ip.c_str());
+    dialog.userName->value(dialog.clients[0].username.c_str());
+  }
+
+  dialog.show();
+
   while (dialog.shown()) Fl::wait();
 
-  if (dialog.serverName->value() == nullptr) {
+  if (dialog.serverName->value() == nullptr || dialog.serverName->value()[0] == '\0') {
     newservername[0] = '\0';
     return;
   }
@@ -160,7 +245,6 @@ void ServerDialog::handleOptions(Fl_Widget* /*widget*/, void* /*data*/)
 {
   OptionsDialog::showDialog();
 }
-
 
 void ServerDialog::handleLoad(Fl_Widget* /*widget*/, void* data)
 {
@@ -199,7 +283,6 @@ void ServerDialog::handleLoad(Fl_Widget* /*widget*/, void* data)
 
   delete(file_chooser);
 }
-
 
 void ServerDialog::handleSaveAs(Fl_Widget* /*widget*/, void* data)
 { 
@@ -261,12 +344,10 @@ void ServerDialog::handleSaveAs(Fl_Widget* /*widget*/, void* data)
   delete(file_chooser);
 }
 
-
 void ServerDialog::handleAbout(Fl_Widget* /*widget*/, void* /*data*/)
 {
   about_vncviewer();
 }
-
 
 void ServerDialog::handleCancel(Fl_Widget* /*widget*/, void* data)
 {
@@ -276,11 +357,46 @@ void ServerDialog::handleCancel(Fl_Widget* /*widget*/, void* data)
   dialog->hide();
 }
 
-
 void ServerDialog::handleConnect(Fl_Widget* /*widget*/, void *data)
 {
   ServerDialog *dialog = (ServerDialog*)data;
   const char* servername = dialog->serverName->value();
+  const char* username = dialog->userName->value();
+
+  if (!servername || servername[0] == '\0') {
+    fl_alert(_("Please enter or select a server IP / hostname."));
+    return;
+  }
+
+  if (username && username[0] != '\0')
+    CConn::setSavedUsername(username);
+  else
+    CConn::setSavedUsername("");
+
+  // Auto-record / update client in list
+  bool found = false;
+  std::string sName = servername;
+  std::string uName = username ? username : "";
+  for (size_t i = 0; i < dialog->clients.size(); ++i) {
+    if (same_server(dialog->clients[i].ip, sName)) {
+      if (!uName.empty())
+        dialog->clients[i].username = uName;
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    ClientEntry ce;
+    ce.ip = sName;
+    ce.username = uName;
+    dialog->clients.push_back(ce);
+  }
+
+  try {
+    dialog->saveClients();
+  } catch (std::exception& e) {
+    vlog.error(_("Unable to save clients: %s"), e.what());
+  }
 
   dialog->hide();
 
@@ -302,34 +418,261 @@ void ServerDialog::handleConnect(Fl_Widget* /*widget*/, void *data)
   }
 }
 
-
-static bool same_server(const std::string& a, const std::string& b)
+void ServerDialog::handleClientSelect(Fl_Widget* /*widget*/, void* data)
 {
-  std::string hostA, hostB;
-  int portA, portB;
+  ServerDialog *dialog = (ServerDialog*)data;
+  int selected = dialog->clientBrowser->value();
+  if (selected <= 1)
+    return;
 
-#ifndef WIN32
-  if ((a.find("/") != std::string::npos) ||
-      (b.find("/") != std::string::npos))
-    return a == b;
-#endif
-
-  try {
-    network::getHostAndPort(a.c_str(), &hostA, &portA);
-    network::getHostAndPort(b.c_str(), &hostB, &portB);
-  } catch (std::exception& e) {
-    return false;
+  size_t idx = (size_t)(selected - 2);
+  if (idx < dialog->clients.size()) {
+    dialog->serverName->value(dialog->clients[idx].ip.c_str());
+    dialog->userName->value(dialog->clients[idx].username.c_str());
   }
 
-  if (hostA != hostB)
-    return false;
-
-  if (portA != portB)
-    return false;
-
-  return true;
+  if (Fl::event_clicks()) {
+    Fl::event_clicks(0);
+    handleConnect(nullptr, dialog);
+  }
 }
 
+void ServerDialog::handleAddOrUpdateClient(Fl_Widget* /*widget*/, void* data)
+{
+  ServerDialog *dialog = (ServerDialog*)data;
+  const char* ip = dialog->serverName->value();
+  const char* user = dialog->userName->value();
+
+  if (!ip || ip[0] == '\0') {
+    fl_alert(_("Please enter a server IP or hostname."));
+    return;
+  }
+
+  std::string strIP = ip;
+  std::string strUser = user ? user : "";
+
+  bool updated = false;
+  for (size_t i = 0; i < dialog->clients.size(); ++i) {
+    if (same_server(dialog->clients[i].ip, strIP)) {
+      dialog->clients[i].username = strUser;
+      updated = true;
+      break;
+    }
+  }
+
+  if (!updated) {
+    ClientEntry ce;
+    ce.ip = strIP;
+    ce.username = strUser;
+    dialog->clients.push_back(ce);
+  }
+
+  dialog->saveClients();
+  dialog->refreshClientBrowser();
+
+  // Re-select this item
+  for (size_t i = 0; i < dialog->clients.size(); ++i) {
+    if (same_server(dialog->clients[i].ip, strIP)) {
+      dialog->clientBrowser->value((int)i + 2);
+      break;
+    }
+  }
+}
+
+void ServerDialog::handleDeleteClient(Fl_Widget* /*widget*/, void* data)
+{
+  ServerDialog *dialog = (ServerDialog*)data;
+  int selected = dialog->clientBrowser->value();
+  if (selected <= 1) {
+    fl_alert(_("Please select a client from the list to delete."));
+    return;
+  }
+
+  size_t idx = (size_t)(selected - 2);
+  if (idx < dialog->clients.size()) {
+    dialog->clients.erase(dialog->clients.begin() + idx);
+    dialog->saveClients();
+    dialog->refreshClientBrowser();
+    dialog->serverName->value("");
+    dialog->userName->value("");
+  }
+}
+
+void ServerDialog::handleClearInputs(Fl_Widget* /*widget*/, void* data)
+{
+  ServerDialog *dialog = (ServerDialog*)data;
+  dialog->clientBrowser->deselect();
+  dialog->serverName->value("");
+  dialog->userName->value("");
+}
+
+void ServerDialog::refreshClientBrowser()
+{
+  clientBrowser->clear();
+  clientBrowser->add(_("@b@.Server / IP\t@b@.Login User"));
+  for (const auto& client : clients) {
+    std::string row = client.ip + "\t" + client.username;
+    clientBrowser->add(row.c_str());
+  }
+}
+
+#ifdef _WIN32
+void ServerDialog::loadClients()
+{
+  clients.clear();
+  HKEY hKey;
+  LONG res = RegOpenKeyExW(HKEY_CURRENT_USER,
+                           L"Software\\TigerVNC\\vncviewer\\clients", 0,
+                           KEY_READ, &hKey);
+  if (res != ERROR_SUCCESS) {
+    return;
+  }
+
+  DWORD count = 0;
+  DWORD type = REG_DWORD;
+  DWORD size = sizeof(count);
+  if (RegQueryValueExW(hKey, L"Count", nullptr, &type, (LPBYTE)&count, &size) == ERROR_SUCCESS) {
+    for (DWORD i = 0; i < count; ++i) {
+      char keyIP[64], keyUser[64];
+      snprintf(keyIP, sizeof(keyIP), "IP_%lu", i);
+      snprintf(keyUser, sizeof(keyUser), "User_%lu", i);
+
+      wchar_t wKeyIP[64], wKeyUser[64];
+      fl_utf8towc(keyIP, strlen(keyIP)+1, wKeyIP, 64);
+      fl_utf8towc(keyUser, strlen(keyUser)+1, wKeyUser, 64);
+
+      wchar_t valIPW[256] = {0};
+      wchar_t valUserW[256] = {0};
+      DWORD valSize = sizeof(valIPW);
+      if (RegQueryValueExW(hKey, wKeyIP, nullptr, nullptr, (LPBYTE)valIPW, &valSize) == ERROR_SUCCESS) {
+        char valIP[256] = {0};
+        char valUser[256] = {0};
+        fl_utf8fromwc(valIP, sizeof(valIP), valIPW, wcslen(valIPW)+1);
+        valSize = sizeof(valUserW);
+        if (RegQueryValueExW(hKey, wKeyUser, nullptr, nullptr, (LPBYTE)valUserW, &valSize) == ERROR_SUCCESS) {
+          fl_utf8fromwc(valUser, sizeof(valUser), valUserW, wcslen(valUserW)+1);
+        }
+        if (valIP[0] != '\0') {
+          ClientEntry ce;
+          ce.ip = valIP;
+          ce.username = valUser;
+          clients.push_back(ce);
+        }
+      }
+    }
+  }
+  RegCloseKey(hKey);
+}
+
+void ServerDialog::saveClients()
+{
+  HKEY hKey;
+  LONG res = RegCreateKeyExW(HKEY_CURRENT_USER,
+                             L"Software\\TigerVNC\\vncviewer\\clients", 0, nullptr,
+                             REG_OPTION_NON_VOLATILE, KEY_ALL_ACCESS, nullptr,
+                             &hKey, nullptr);
+  if (res != ERROR_SUCCESS) {
+    vlog.error(_("Failed to open registry key for clients: %ld"), res);
+    return;
+  }
+
+  // Clear existing entries
+  DWORD oldCount = 0;
+  DWORD type = REG_DWORD;
+  DWORD size = sizeof(oldCount);
+  if (RegQueryValueExW(hKey, L"Count", nullptr, &type, (LPBYTE)&oldCount, &size) == ERROR_SUCCESS) {
+    for (DWORD i = 0; i < oldCount; ++i) {
+      char keyIP[64], keyUser[64];
+      snprintf(keyIP, sizeof(keyIP), "IP_%lu", i);
+      snprintf(keyUser, sizeof(keyUser), "User_%lu", i);
+      wchar_t wKeyIP[64], wKeyUser[64];
+      fl_utf8towc(keyIP, strlen(keyIP)+1, wKeyIP, 64);
+      fl_utf8towc(keyUser, strlen(keyUser)+1, wKeyUser, 64);
+      RegDeleteValueW(hKey, wKeyIP);
+      RegDeleteValueW(hKey, wKeyUser);
+    }
+  }
+
+  DWORD count = (DWORD)clients.size();
+  RegSetValueExW(hKey, L"Count", 0, REG_DWORD, (const BYTE*)&count, sizeof(count));
+
+  for (DWORD i = 0; i < count; ++i) {
+    char keyIP[64], keyUser[64];
+    snprintf(keyIP, sizeof(keyIP), "IP_%lu", i);
+    snprintf(keyUser, sizeof(keyUser), "User_%lu", i);
+
+    wchar_t wKeyIP[64], wKeyUser[64];
+    fl_utf8towc(keyIP, strlen(keyIP)+1, wKeyIP, 64);
+    fl_utf8towc(keyUser, strlen(keyUser)+1, wKeyUser, 64);
+
+    wchar_t valIPW[256], valUserW[256];
+    fl_utf8towc(clients[i].ip.c_str(), clients[i].ip.size()+1, valIPW, 256);
+    fl_utf8towc(clients[i].username.c_str(), clients[i].username.size()+1, valUserW, 256);
+
+    RegSetValueExW(hKey, wKeyIP, 0, REG_SZ, (const BYTE*)valIPW, (wcslen(valIPW)+1)*sizeof(wchar_t));
+    RegSetValueExW(hKey, wKeyUser, 0, REG_SZ, (const BYTE*)valUserW, (wcslen(valUserW)+1)*sizeof(wchar_t));
+  }
+
+  RegCloseKey(hKey);
+}
+#else
+const char* CLIENTS_FILE="tigervnc.clients";
+
+void ServerDialog::loadClients()
+{
+  clients.clear();
+  const char* stateDir = core::getvncstatedir();
+  if (stateDir == nullptr)
+    return;
+
+  char filepath[PATH_MAX];
+  snprintf(filepath, sizeof(filepath), "%s/%s", stateDir, CLIENTS_FILE);
+  FILE* f = fopen(filepath, "r");
+  if (!f)
+    return;
+
+  char line[512];
+  while (fgets(line, sizeof(line), f)) {
+    char* p = strchr(line, '\r');
+    if (p) *p = '\0';
+    p = strchr(line, '\n');
+    if (p) *p = '\0';
+
+    if (line[0] == '\0')
+      continue;
+
+    char* tab = strchr(line, '\t');
+    ClientEntry ce;
+    if (tab) {
+      *tab = '\0';
+      ce.ip = line;
+      ce.username = tab + 1;
+    } else {
+      ce.ip = line;
+    }
+    clients.push_back(ce);
+  }
+  fclose(f);
+}
+
+void ServerDialog::saveClients()
+{
+  const char* stateDir = core::getvncstatedir();
+  if (stateDir == nullptr)
+    return;
+
+  char filepath[PATH_MAX];
+  snprintf(filepath, sizeof(filepath), "%s/%s", stateDir, CLIENTS_FILE);
+  FILE* f = fopen(filepath, "w");
+  if (!f)
+    return;
+
+  for (const auto& client : clients) {
+    fprintf(f, "%s\t%s\n", client.ip.c_str(), client.username.c_str());
+  }
+  fclose(f);
+}
+#endif
 
 void ServerDialog::loadServerHistory()
 {

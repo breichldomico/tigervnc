@@ -20,13 +20,23 @@
 #define __SERVERDIALOG_H__
 
 #include <FL/Fl_Window.H>
+#include <FL/Fl_Hold_Browser.H>
+#include <FL/Fl_Input.H>
+#include <FL/Fl_Button.H>
+#include <FL/Fl_Return_Button.H>
 #include <string>
+#include <vector>
 #include <list>
 
 #include "fltk/Fl_Suggestion_Input.h"
 
 class Fl_Widget;
 class Fl_Input_Choice;
+
+struct ClientEntry {
+  std::string ip;
+  std::string username;
+};
 
 class ServerDialog : public Fl_Window {
 protected:
@@ -44,16 +54,32 @@ protected:
   static void handleCancel(Fl_Widget *widget, void *data);
   static void handleConnect(Fl_Widget *widget, void *data);
 
+  static void handleClientSelect(Fl_Widget *widget, void *data);
+  static void handleAddOrUpdateClient(Fl_Widget *widget, void *data);
+  static void handleDeleteClient(Fl_Widget *widget, void *data);
+  static void handleClearInputs(Fl_Widget *widget, void *data);
+
 private:
   void loadServerHistory();
   void saveServerHistory();
   void updateUsedDir(const char* filename);
 
+  void loadClients();
+  void saveClients();
+  void refreshClientBrowser();
+
   static void onServerHistoryRemove(Fl_Widget*, std::string s, void* data);
   static std::string serverHistoryNormalize(const std::string s);
 
 protected:
-  Fl_Suggestion_Input *serverName;
+  Fl_Hold_Browser *clientBrowser;
+  Fl_Input *serverName;
+  Fl_Input *userName;
+  Fl_Button *btnAddUpdate;
+  Fl_Button *btnDelete;
+  Fl_Button *btnClear;
+
+  std::vector<ClientEntry> clients;
   std::list<std::string> serverHistory;
   std::string usedDir;
 };

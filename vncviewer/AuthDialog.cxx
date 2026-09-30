@@ -38,6 +38,7 @@
 
 #include "AuthDialog.h"
 #include "parameters.h"
+#include "CConn.h"
 
 /* xpm:s predate const, so they have invalid definitions */
 #pragma GCC diagnostic push
@@ -92,6 +93,8 @@ AuthDialog::AuthDialog(bool secure_, bool needsUser, bool needsPassword)
     username = new Fl_Input(x, y,  w()- x - OUTER_MARGIN,
                             INPUT_HEIGHT, _("Username:"));
     username->align(FL_ALIGN_LEFT | FL_ALIGN_TOP);
+    if (!CConn::getSavedUsername().empty())
+      username->value(CConn::getSavedUsername().c_str());
     y += INPUT_HEIGHT + INNER_MARGIN;
   } else {
     username = nullptr;

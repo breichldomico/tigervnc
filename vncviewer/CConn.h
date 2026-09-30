@@ -45,6 +45,9 @@ public:
   unsigned getPixelCount();
   unsigned getPosition();
 
+  static void setSavedUsername(const std::string& user) { savedUsername = user; }
+  static std::string getSavedUsername() { return savedUsername; }
+
 protected:
 
   // Callback when socket is ready (or broken)
